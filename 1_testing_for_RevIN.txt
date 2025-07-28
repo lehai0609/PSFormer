@@ -1,0 +1,193 @@
+# RevIN Integration Testing Plan for PSformer
+
+Based on the RevIN paper and implementation, here's a comprehensive testing strategy following TDD principles:
+
+## 1. Data Validation Tests
+
+### Test Category: Input Data Integrity
+```pseudo
+TEST_SUITE: RevIN_Input_Validation
+├── test_input_shape_validation()
+│   ├── GIVEN: Various input tensor shapes [batch, channels, sequence_length]
+│   ├── WHEN: RevIN processes inputs
+│   ├── THEN: Accept valid shapes, reject invalid dimensions
+│   └── ASSERT: Proper error messages for malformed inputs
+
+├── test_input_data_types()
+│   ├── GIVEN: Different tensor dtypes (float32, float64, int)
+│   ├── WHEN: RevIN normalizes data
+│   ├── THEN: Handle float types correctly, reject non-numeric
+│   └── ASSERT: No silent type conversions
+
+├── test_statistical_prerequisites()
+│   ├── GIVEN: Edge case data (all zeros, constant values, extreme outliers)
+│   ├── WHEN: Computing instance statistics
+│   ├── THEN: Handle numerical stability (eps parameter)
+│   └── ASSERT: No NaN/Inf in statistics computation
+```
+
+## 2. Processing/Feature Engineering Tests
+
+### Test Category: Normalization Mathematics
+```pseudo
+TEST_SUITE: RevIN_Processing_Logic
+├── test_instance_statistics_computation()
+│   ├── GIVEN: Known input sequences with calculable mean/std
+│   ├── WHEN: RevIN computes statistics per instance
+│   ├── THEN: Statistics match manual calculations
+│   └── ASSERT: μ and σ computed correctly across temporal dimension
+
+├── test_normalization_transformation()
+│   ├── GIVEN: Input with known statistics
+│   ├── WHEN: Apply normalization step
+│   ├── THEN: Output has expected normalized distribution
+│   └── ASSERT: (x - μ) / σ transformation correct
+
+├── test_affine_parameter_application()
+│   ├── GIVEN: Normalized data and learnable parameters γ, β
+│   ├── WHEN: Apply affine transformation
+│   ├── THEN: Output = γ * normalized + β
+│   └── ASSERT: Learnable parameters properly applied
+
+├── test_denormalization_symmetry()
+│   ├── GIVEN: Original input and corresponding model output
+│   ├── WHEN: Apply denormalization using stored statistics
+│   ├── THEN: Inverse transformation restores original scale
+│   └── ASSERT: Perfect symmetry when model output = normalized input
+```
+
+## 3. Model Behavior Tests
+
+### Test Category: Integration and Functional Behavior
+```pseudo
+TEST_SUITE: RevIN_Model_Integration
+├── test_end_to_end_pipeline()
+│   ├── GIVEN: Sample time series data
+│   ├── WHEN: Full RevIN forward pass (norm → model → denorm)
+│   ├── THEN: Output shape matches expected prediction shape
+│   └── ASSERT: Pipeline executes without errors
+
+├── test_gradient_flow()
+│   ├── GIVEN: RevIN integrated with simple neural network
+│   ├── WHEN: Backward pass computed
+│   ├── THEN: Gradients flow through normalization layers
+│   └── ASSERT: γ, β parameters receive gradients
+
+├── test_parameter_learning()
+│   ├── GIVEN: Training data with multiple epochs
+│   ├── WHEN: RevIN parameters optimized
+│   ├── THEN: γ, β parameters update during training
+│   └── ASSERT: Parameters converge to reasonable values
+
+├── test_mode_consistency()
+│   ├── GIVEN: Same input in training vs inference mode
+│   ├── WHEN: RevIN processes data in both modes
+│   ├── THEN: Consistent behavior regardless of mode
+│   └── ASSERT: No batch normalization-like training/eval differences
+```
+
+## 4. Performance and Robustness Tests
+
+### Test Category: Edge Cases and Error Handling
+```pseudo
+TEST_SUITE: RevIN_Robustness
+├── test_zero_variance_handling()
+│   ├── GIVEN: Input sequences with constant values (σ = 0)
+│   ├── WHEN: RevIN attempts normalization
+│   ├── THEN: eps parameter prevents division by zero
+│   └── ASSERT: No crashes, reasonable output values
+
+├── test_extreme_value_handling()
+│   ├── GIVEN: Inputs with very large/small values, outliers
+│   ├── WHEN: Computing statistics and normalization
+│   ├── THEN: Numerical stability maintained
+│   └── ASSERT: No overflow/underflow, reasonable range
+
+├── test_batch_independence()
+│   ├── GIVEN: Batched input with different statistical properties
+│   ├── WHEN: Process batch through RevIN
+│   ├── THEN: Each sample normalized independently
+│   └── ASSERT: No cross-contamination between batch items
+
+├── test_memory_efficiency()
+│   ├── GIVEN: Large input tensors
+│   ├── WHEN: RevIN processes data
+│   ├── THEN: Memory usage remains reasonable
+│   └── ASSERT: No memory leaks, efficient computation
+
+├── test_different_sequence_lengths()
+│   ├── GIVEN: Variable length input sequences
+│   ├── WHEN: RevIN handles different temporal dimensions
+│   ├── THEN: Adapts correctly to sequence length
+│   └── ASSERT: No hardcoded length assumptions
+```
+
+## 5. Architecture Tests
+
+### Test Category: PSformer Integration Specifics
+```pseudo
+TEST_SUITE: RevIN_PSformer_Architecture
+├── test_psformer_integration_points()
+│   ├── GIVEN: PSformer encoder with RevIN at input/output
+│   ├── WHEN: Data flows through complete architecture
+│   ├── THEN: RevIN integrates seamlessly with PS blocks
+│   └── ASSERT: No shape mismatches, proper data flow
+
+├── test_parameter_sharing_compatibility()
+│   ├── GIVEN: PSformer's parameter sharing mechanism
+│   ├── WHEN: RevIN parameters coexist with shared PS blocks
+│   ├── THEN: No interference between parameter sets
+│   └── ASSERT: RevIN γ, β independent of PS block parameters
+
+├── test_segment_attention_interaction()
+│   ├── GIVEN: RevIN output feeding into segment attention
+│   ├── WHEN: Attention mechanisms process normalized data
+│   ├── THEN: Attention patterns form correctly
+│   └── ASSERT: Normalization doesn't interfere with attention
+
+├── test_multi_encoder_consistency()
+│   ├── GIVEN: Multiple PSformer encoder layers
+│   ├── WHEN: RevIN applied only at input/output
+│   ├── THEN: Intermediate representations maintain consistency
+│   └── ASSERT: No accumulation of normalization artifacts
+
+├── test_shape_compatibility_through_pipeline()
+│   ├── GIVEN: PSformer's shape transformations (patches, segments)
+│   ├── WHEN: RevIN processes reshaped data
+│   ├── THEN: All intermediate shapes compatible
+│   └── ASSERT: [batch, variables, sequence] → [batch, variables, prediction]
+```
+
+## 6. Comparison and Validation Tests
+
+### Test Category: Implementation Verification
+```pseudo
+TEST_SUITE: RevIN_Implementation_Validation
+├── test_against_reference_implementation()
+│   ├── GIVEN: Official RevIN implementation as reference
+│   ├── WHEN: Same inputs processed by both implementations
+│   ├── THEN: Outputs match within numerical tolerance
+│   └── ASSERT: Functional equivalence verified
+
+├── test_paper_algorithm_compliance()
+│   ├── GIVEN: Algorithm 1 from RevIN paper
+│   ├── WHEN: Implementation follows paper specifications
+│   ├── THEN: Each step matches mathematical description
+│   └── ASSERT: Faithful implementation of research
+
+├── test_distribution_shift_handling()
+│   ├── GIVEN: Training/test data with different distributions
+│   ├── WHEN: RevIN normalizes both datasets
+│   ├── THEN: Distribution discrepancy reduced
+│   └── ASSERT: Improved forecasting performance on shifted data
+```
+
+## Test Execution Strategy
+
+1. **Unit Tests First**: Test each component in isolation
+2. **Integration Tests**: Test RevIN + PSformer components together  
+3. **End-to-End Tests**: Full pipeline with real time series data
+4. **Property-Based Tests**: Use hypothesis/property testing for edge cases
+5. **Performance Benchmarks**: Compare with/without RevIN on standard datasets
+
+This testing approach ensures RevIN integrates correctly with PSformer while maintaining the mathematical guarantees described in the research paper.

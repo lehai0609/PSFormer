@@ -1,0 +1,49 @@
+Conceptual Implementation Strategy
+Design Considerations:
+
+Dimension Consistency: All three linear layers must have same input/output dimensions
+Parameter Sharing: The block will be instantiated once but used multiple times
+Residual Path: Must preserve original input for the residual connection
+Memory Efficiency: Store intermediate results efficiently
+
+Pseudo Code:
+pseudocodeCLASS PSBlock:
+    INITIALIZE(dimension_size):
+        self.linear1 = LinearLayer(dimension_size, dimension_size)
+        self.linear2 = LinearLayer(dimension_size, dimension_size) 
+        self.linear3 = LinearLayer(dimension_size, dimension_size)
+        self.activation = GeLU()
+    
+    FORWARD(input_tensor):
+        # Store original input for residual connection
+        residual = input_tensor
+        
+        # First transformation: Linear -> GeLU -> Linear + Residual
+        x = self.linear1(input_tensor)
+        x = self.activation(x)
+        x = self.linear2(x)
+        intermediate_output = x + residual
+        
+        # Second transformation: Linear
+        final_output = self.linear3(intermediate_output)
+        
+        RETURN final_output
+Key Implementation Insights:
+
+Tensor Dimensions: For PSformer with segments=32 and segment_length=112 (7 variables × 16 patch_size), all linear layers are (112, 112)
+Parameter Sharing Strategy:
+
+Create one PS Block instance
+Use same instance for: Stage1 attention Q/K/V generation, Stage2 attention Q/K/V generation, and final encoder output
+
+
+Residual Connection Timing:
+
+First residual happens after linear2 (before linear3)
+This differs from typical transformer FFN where residual wraps the entire block
+
+
+Initialization Strategy:
+
+Consider Xavier/Kaiming initialization for linear layers
+Potentially initialize linear3 with smaller weights since it's the final transformation
