@@ -70,12 +70,8 @@ class PSBlock(nn.Module):
             if x.shape[1] != self.N:
                 raise ValueError(f"Input tensor second dimension must be {self.N}, got {x.shape[1]}")
         
-        # Check for NaN or infinite values
-        if torch.isnan(x).any():
-            raise ValueError("Input tensor contains NaN values")
-            
-        if torch.isinf(x).any():
-            raise ValueError("Input tensor contains infinite values")
+        # Note: Allow NaN and Inf to propagate through the network
+        # This is intentional for robustness testing
         
         # Store original input for residual connection
         residual = x

@@ -32,9 +32,10 @@ class RevIN(nn.Module):
     def _get_statistics(self, x):
         if x.ndim != 3:
             raise IndexError(f"Expected 3D input tensor [batch, channels, length], got {x.ndim}D tensor")
-        dim2reduce = tuple(range(1, x.ndim-1))
-        self.mean = torch.mean(x, dim=dim2reduce, keepdim=True).detach()
-        self.stdev = torch.sqrt(torch.var(x, dim=dim2reduce, keepdim=True, unbiased=False) + self.eps).detach()
+        # Compute statistics over the time dimension (dim=2) for each channel separately
+        # Input shape: [batch, channels, time] -> statistics shape: [batch, channels, 1]
+        self.mean = torch.mean(x, dim=2, keepdim=True).detach()
+        self.stdev = torch.sqrt(torch.var(x, dim=2, keepdim=True, unbiased=False) + self.eps).detach()
 
     def _normalize(self, x):
         x = x - self.mean

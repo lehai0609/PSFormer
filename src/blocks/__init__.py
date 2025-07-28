@@ -8,6 +8,7 @@ from .attention import (
     PSformerEncoderLayer, 
     PSformerEncoder
 )
+from .psformer import PSformer, PSformerConfig, create_psformer_model
 
 __all__ = [
     'PSBlock', 
@@ -19,5 +20,8 @@ __all__ = [
     'SegmentAttentionStage',
     'TwoStageSegmentAttention',
     'PSformerEncoderLayer',
-    'PSformerEncoder'
+    'PSformerEncoder',
+    'PSformer',
+    'PSformerConfig',
+    'create_psformer_model'
 ]
