@@ -223,9 +223,9 @@ class TestSegmentAttentionStage:
         # Forward pass
         output, weights = attention_stage(x)
         
-        # Check shapes
+        # Check shapes - attention now operates across C dimension
         assert output.shape == (batch, N, C)
-        assert weights.shape == (batch, N, N)
+        assert weights.shape == (batch, C, C)
     
     def test_input_validation(self):
         """Test input validation"""
@@ -295,10 +295,10 @@ class TestTwoStageSegmentAttention:
         # Forward pass
         output, (stage1_weights, stage2_weights) = two_stage_attention(x)
         
-        # Check shapes
+        # Check shapes - attention now operates across C dimension
         assert output.shape == (batch, N, C)
-        assert stage1_weights.shape == (batch, N, N)
-        assert stage2_weights.shape == (batch, N, N)
+        assert stage1_weights.shape == (batch, C, C)
+        assert stage2_weights.shape == (batch, C, C)
     
     def test_input_validation(self):
         """Test input validation"""

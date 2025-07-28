@@ -91,13 +91,13 @@ class SegmentAttentionStage(nn.Module):
         
         Args:
             x: Input tensor of shape [batch, N, C] where:
-               - N is the number of segments (sequence dimension for attention)
-               - C is the segment length (feature dimension)
+               - N is the number of segments
+               - C is the segment length (spatial-temporal features dimension for attention)
                
         Returns:
             Tuple of (attention_output, attention_weights) where:
-            - attention_output: Tensor of shape [batch, N, C]
-            - attention_weights: Tensor of shape [batch, N, N]
+            - attention_output: Tensor of shape [batch, N, C]  
+            - attention_weights: Tensor of shape [batch, C, C]
         """
         # Validate input shape
         if x.dim() != 3:
@@ -109,13 +109,17 @@ class SegmentAttentionStage(nn.Module):
         # In PSformer, all three come from the same PS Block output
         ps_output = self.ps_block(x)  # [batch, N, C]
         
-        # Use same output for Q, K, V (key PSformer innovation)
-        Q = ps_output
-        K = ps_output
-        V = ps_output
+        # According to paper: attention operates across C dimension (spatial-temporal features)
+        # Transpose to [batch, C, N] so attention is computed across C dimension
+        Q = ps_output.transpose(-2, -1).contiguous()  # [batch, C, N]
+        K = ps_output.transpose(-2, -1).contiguous()  # [batch, C, N] 
+        V = ps_output.transpose(-2, -1).contiguous()  # [batch, C, N]
         
-        # Apply attention
+        # Apply attention - this will create [batch, C, C] attention matrix
         attention_output, attention_weights = self.attention(Q, K, V)
+        
+        # Transpose back to [batch, N, C] to maintain output format
+        attention_output = attention_output.transpose(-2, -1).contiguous()  # [batch, N, C]
         
         return attention_output, attention_weights
 
@@ -146,8 +150,8 @@ class TwoStageSegmentAttention(nn.Module):
         Returns:
             Tuple of (output, (stage1_weights, stage2_weights)) where:
             - output: Tensor of shape [batch, N, C]
-            - stage1_weights: Tensor of shape [batch, N, N]
-            - stage2_weights: Tensor of shape [batch, N, N]
+            - stage1_weights: Tensor of shape [batch, C, C]
+            - stage2_weights: Tensor of shape [batch, C, C]
         """
         # Validate input shape
         if x.dim() != 3:
