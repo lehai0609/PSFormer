@@ -46,18 +46,30 @@ class PSBlock(nn.Module):
         Forward pass implementing the three-step transformation
         
         Args:
-            x: Input tensor of shape (C, N)
+            x: Input tensor of shape (C, N) or (batch, C, N)
             
         Returns:
-            Output tensor of shape (C, N)
+            Output tensor of same shape as input
         """
+        # Handle both 2D and 3D tensors
+        original_shape = x.shape
+        is_3d = x.dim() == 3
+        
         # Validate input shape
-        if x.dim() != 2:
-            raise ValueError(f"Input tensor must be 2-dimensional, got {x.dim()}")
-            
-        if x.shape[1] != self.N:
-            raise ValueError(f"Input tensor second dimension must be {self.N}, got {x.shape[1]}")
-            
+        if x.dim() not in [2, 3]:
+            raise ValueError(f"Input tensor must be 2 or 3-dimensional, got {x.dim()}")
+        
+        if is_3d:
+            # Reshape 3D to 2D: [batch, C, N] -> [batch*C, N]
+            batch, C, N = x.shape
+            if N != self.N:
+                raise ValueError(f"Input tensor last dimension must be {self.N}, got {N}")
+            x = x.view(-1, N)  # [batch*C, N]
+        else:
+            # 2D case
+            if x.shape[1] != self.N:
+                raise ValueError(f"Input tensor second dimension must be {self.N}, got {x.shape[1]}")
+        
         # Check for NaN or infinite values
         if torch.isnan(x).any():
             raise ValueError("Input tensor contains NaN values")
@@ -76,5 +88,9 @@ class PSBlock(nn.Module):
         
         # Second transformation: Linear
         final_output = self.linear3(intermediate_output)
+        
+        # Reshape back to original shape if needed
+        if is_3d:
+            final_output = final_output.view(batch, C, N)
         
         return final_output

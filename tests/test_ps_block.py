@@ -12,24 +12,34 @@ class TestPSBlockDataValidation:
         N = 32
         ps_block = PSBlock(N)
         
-        # Valid input
-        valid_input = torch.randn(112, N)
-        output = ps_block(valid_input)
-        assert output.shape == valid_input.shape
+        # Valid 2D input
+        valid_input_2d = torch.randn(112, N)
+        output = ps_block(valid_input_2d)
+        assert output.shape == valid_input_2d.shape
+        
+        # Valid 3D input
+        valid_input_3d = torch.randn(10, 112, N)
+        output = ps_block(valid_input_3d)
+        assert output.shape == valid_input_3d.shape
         
         # Invalid 1D tensor
         with pytest.raises(ValueError):
             invalid_input = torch.randn(N)
             ps_block(invalid_input)
             
-        # Invalid 3D tensor
+        # Invalid 4D tensor
         with pytest.raises(ValueError):
-            invalid_input = torch.randn(10, 112, N)
+            invalid_input = torch.randn(10, 112, N, 5)
             ps_block(invalid_input)
             
-        # Wrong second dimension
+        # Wrong last dimension in 2D
         with pytest.raises(ValueError):
             invalid_input = torch.randn(112, N+1)
+            ps_block(invalid_input)
+            
+        # Wrong last dimension in 3D
+        with pytest.raises(ValueError):
+            invalid_input = torch.randn(10, 112, N+1)
             ps_block(invalid_input)
 
     def test_input_data_quality(self):
@@ -60,14 +70,24 @@ class TestPSBlockDataValidation:
         N = 32
         ps_block = PSBlock(N)
         
-        # Valid input with matching N dimension
-        valid_input = torch.randn(112, N)
-        output = ps_block(valid_input)
-        assert output.shape == valid_input.shape
+        # Valid 2D input with matching N dimension
+        valid_input_2d = torch.randn(112, N)
+        output = ps_block(valid_input_2d)
+        assert output.shape == valid_input_2d.shape
         
-        # Invalid input with mismatched N dimension
+        # Valid 3D input with matching N dimension
+        valid_input_3d = torch.randn(10, 112, N)
+        output = ps_block(valid_input_3d)
+        assert output.shape == valid_input_3d.shape
+        
+        # Invalid 2D input with mismatched N dimension
         with pytest.raises(ValueError):
             invalid_input = torch.randn(112, N-1)
+            ps_block(invalid_input)
+            
+        # Invalid 3D input with mismatched N dimension
+        with pytest.raises(ValueError):
+            invalid_input = torch.randn(10, 112, N-1)
             ps_block(invalid_input)
 
     def test_extreme_value_handling(self):
