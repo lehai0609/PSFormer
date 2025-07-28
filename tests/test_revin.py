@@ -142,7 +142,13 @@ class TestRevINProcessingLogic:
         mean = torch.mean(input_tensor, dim=dim2reduce, keepdim=True)
         stdev = torch.sqrt(torch.var(input_tensor, dim=dim2reduce, keepdim=True, unbiased=False) + revin.eps)
         normalized = (input_tensor - mean) / stdev
-        manual_affine = normalized * revin.affine_weight + revin.affine_bias
+        
+        # Reshape affine parameters to match the dimensions for broadcasting
+        # affine_weight: [num_features] -> [1, num_features, 1]
+        # affine_bias: [num_features] -> [1, num_features, 1]
+        weight = revin.affine_weight.view(1, -1, 1)
+        bias = revin.affine_bias.view(1, -1, 1)
+        manual_affine = normalized * weight + bias
         
         # Run through RevIN
         revin_result = revin(input_tensor, mode='norm')
