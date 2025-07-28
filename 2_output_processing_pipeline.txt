@@ -1,0 +1,157 @@
+This plan strictly follows the data flow illustrated in Figures 1 and 2 and the descriptions in Section 3.2 of the paper.
+
+### **Conceptual Overview**
+
+The output pipeline's primary role is to take the abstract, segmented representation from the PSformer Encoder and transform it back into a concrete forecast in the original data space. This involves three sequential operations:
+
+1.  **Inverse Data Transformation**: Revert the "patching and segmenting" process to restore the time series structure.
+2.  **Linear Projection**: Map the restored time series from the input sequence length to the desired future prediction length.
+3.  **Inverse Normalization**: Apply the inverse RevIN operation to scale the forecast back to the original magnitude of the time series variables.
+
+This flow is depicted in the "PSformer Dataflow Pipline" (Figure 1) and the "PSformer Network Structure" (Figure 2) of the paper.
+
+---
+
+### **Implementation Planning & Pseudo-Code**
+
+The following steps outline how to implement this pipeline within the existing `PSformer` class in `psformer.py`. You will need to add a new linear layer for the projection and extend the `forward` method.
+
+#### **Step 0: Add a Linear Projection Layer**
+
+In the `__init__` method of your `PSformer` class in `psformer.py`, you need to define a linear layer for forecasting. This layer will map the last dimension of the tensor from the input sequence length (`L`) to the forecast horizon (`F`).
+
+**Pseudo-Code for `PSformer.__init__`:**
+
+```python
+# In PSformer.__init__(self, config: PSformerConfig):
+
+# ... (existing code for revin_layer, data_transformer, encoder) ...
+
+# 5. Add the final linear projection layer for forecasting
+# This layer maps the sequence length (L) to the prediction length (F).
+# Let's assume prediction_length (F) is a new parameter in PSformerConfig.
+self.prediction_length = config.prediction_length # e.g., F = 96, 192, etc.
+
+# The linear layer will map the features of the last dimension
+# from config.sequence_length to self.prediction_length.
+self.output_projection = nn.Linear(
+    in_features=config.sequence_length, 
+    out_features=self.prediction_length
+)
+
+```
+
+#### **Step 1: Inverse Transform (Segments to Time Series)**
+
+The encoder provides an output of shape `[batch, N, C]`, where `N` is the number of patches and `C` is the segment length. Use the `data_transformer.inverse_transform` method to convert this back to the standard time series shape `[batch, M, L]`.
+
+*   **Input**: `encoder_output` of shape `[batch, N, C]` (or `[batch_size, num_patches, segment_length]`)
+*   **Output**: `reshaped_output` of shape `[batch, M, L]` (or `[batch_size, num_variables, sequence_length]`)
+*   **Method**: `self.data_transformer.inverse_transform()`
+*   **Key Argument**: The `target_sequence_length` for this operation is the original input sequence length (`L`), which is `self.config.sequence_length`.
+
+**Pseudo-Code for this step:**
+
+```python
+# This logic will be inside the PSformer.forward method, after getting the encoder_output
+
+# encoder_output shape: [batch, N, C]
+# N = num_patches, C = segment_length
+
+# Use the inverse_transform method from the data transformer
+# The target length is the original input sequence length (L)
+reshaped_output = self.data_transformer.inverse_transform(
+    segment_tensor=encoder_output, 
+    target_sequence_length=self.config.sequence_length
+)
+
+# reshaped_output shape: [batch, M, L]
+# M = num_variables, L = sequence_length
+```
+
+#### **Step 2: Linear Projection for Forecasting**
+
+Now, apply the linear layer defined in Step 0. This layer projects the time series from its current length `L` to the required forecast length `F`. The linear layer automatically operates on the last dimension, which is exactly what is needed.
+
+*   **Input**: `reshaped_output` of shape `[batch, M, L]`
+*   **Output**: `projected_output` of shape `[batch, M, F]`
+*   **Method**: `self.output_projection()`
+
+**Pseudo-Code for this step:**
+
+```python
+# The input tensor has shape [batch, M, L]. The linear layer acts on the last dimension (L).
+projected_output = self.output_projection(reshaped_output)
+
+# projected_output shape: [batch, M, F]
+# F = prediction_length
+```
+
+#### **Step 3: Denormalize the Output (Inverse RevIN)**
+
+The final step is to denormalize the predictions using the statistics (mean and standard deviation) that `RevIN` stored during the initial normalization step.
+
+*   **Input**: `projected_output` of shape `[batch, M, F]`
+*   **Output**: `final_predictions` of shape `[batch, M, F]`
+*   **Method**: `self.revin_layer()` with `mode='denorm'`
+
+**Pseudo-Code for this step:**
+
+```python
+# Use the revin_layer with 'denorm' mode to apply the inverse transformation
+final_predictions = self.revin_layer(projected_output, mode='denorm')
+
+# final_predictions shape: [batch, M, F]
+# The values are now in the original scale of the input data.
+```
+
+---
+
+### **Complete Output Pipeline Pseudo-Code**
+
+Here is the combined pseudo-code showing how to extend your `PSformer.forward` method to include the full output pipeline.
+
+```python
+# In PSformer class in psformer.py
+
+def forward(self, raw_input_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Forward pass implementing the complete pipeline: 
+    Input -> Normalization -> Transformation -> Encoder -> Inverse Transformation -> Projection -> Inverse Normalization -> Output
+    """
+    # ... (existing input validation) ...
+    
+    # ----- START OF INPUT PROCESSING PIPELINE -----
+    # STEP 1: NORMALIZATION
+    normalized_input = self.revin_layer(raw_input_tensor, mode='norm') # Shape: [B, M, L]
+    
+    # STEP 2: DATA TRANSFORMATION
+    encoder_ready_data = self.data_transformer.forward_transform(normalized_input) # Shape: [B, N, C]
+    
+    # STEP 3: ENCODER PROCESSING
+    encoder_output, attention_weights_list = self.encoder(encoder_ready_data) # Shape: [B, N, C]
+    
+    # ----- END OF INPUT PROCESSING, START OF OUTPUT PIPELINE -----
+    
+    # STEP 4.1: INVERSE DATA TRANSFORMATION
+    # Description: Convert the encoder's segmented output back to time series format.
+    # Paper reference: "Inverse Transformation" block in Fig 1 & 2.
+    reshaped_output = self.data_transformer.inverse_transform(
+        encoder_output, 
+        self.config.sequence_length
+    ) # Shape: [B, M, L]
+    
+    # STEP 4.2: LINEAR PROJECTION FOR FORECASTING
+    # Description: Project the restored sequence to the desired prediction horizon.
+    # Paper reference: "Linear Mapping" (Fig 1) or WF matrix multiplication (Section 3.2).
+    projected_output = self.output_projection(reshaped_output) # Shape: [B, M, F]
+    
+    # STEP 4.3: INVERSE NORMALIZATION (RevIN Denorm)
+    # Description: Scale the forecast back to the original data distribution.
+    # Paper reference: "Inverse RevIN" (Fig 1) or "RevIN⁻¹" (Fig 2).
+    final_predictions = self.revin_layer(projected_output, mode='denorm') # Shape: [B, M, F]
+    
+    # Return the final predictions. You might also want to return attention weights for analysis.
+    return final_predictions # Or (final_predictions, attention_weights_list)
+
+```

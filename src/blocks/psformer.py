@@ -15,6 +15,7 @@ class PSformerConfig:
                  num_variables: int, 
                  patch_size: int,
                  num_encoder_layers: int,
+                 prediction_length: int,
                  affine_revin: bool = True,
                  revin_eps: float = 1e-5):
         """
@@ -23,6 +24,7 @@ class PSformerConfig:
             num_variables: Number of time series variables (M)
             patch_size: Size of each temporal patch (P)
             num_encoder_layers: Number of PSformer encoder layers
+            prediction_length: Length of prediction horizon (F)
             affine_revin: Whether to use learnable affine parameters in RevIN
             revin_eps: Small value for numerical stability in RevIN
         """
@@ -30,6 +32,7 @@ class PSformerConfig:
         self.num_variables = num_variables
         self.patch_size = patch_size
         self.num_encoder_layers = num_encoder_layers
+        self.prediction_length = prediction_length
         self.affine_revin = affine_revin
         self.revin_eps = revin_eps
         
@@ -46,6 +49,8 @@ class PSformerConfig:
             raise ValueError(f"Patch size must be positive, got {self.patch_size}")
         if self.num_encoder_layers <= 0:
             raise ValueError(f"Number of encoder layers must be positive, got {self.num_encoder_layers}")
+        if self.prediction_length <= 0:
+            raise ValueError(f"Prediction length must be positive, got {self.prediction_length}")
 
 
 class PSformer(nn.Module):
@@ -96,21 +101,28 @@ class PSformer(nn.Module):
             segment_length=psformer_dims['C']
         )
         
+        # 5. Add the final linear projection layer for forecasting
+        # This layer maps the sequence length (L) to the prediction length (F)
+        # Paper reference: X_pred = X_out * W_F where W_F ∈ R^(L×F)
+        self.output_projection = nn.Linear(
+            in_features=config.sequence_length,
+            out_features=config.prediction_length
+        )
+        
         # Store dimensions for easy access
         self.psformer_dims = psformer_dims
     
-    def forward(self, raw_input_tensor: torch.Tensor) -> Tuple[torch.Tensor, list]:
+    def forward(self, raw_input_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass implementing the complete input processing pipeline.
+        Forward pass implementing the complete pipeline: 
+        Input -> Normalization -> Transformation -> Encoder -> Inverse Transformation -> Projection -> Inverse Normalization -> Output
         
         Args:
             raw_input_tensor: Input tensor of shape [batch_size, num_variables, sequence_length]
                              or [batch, M, L] as per the paper notation
         
         Returns:
-            Tuple of (encoder_output, attention_weights_list) where:
-            - encoder_output: Tensor of shape [batch, N, C] where N=num_patches, C=segment_length
-            - attention_weights_list: List of attention weights from each encoder layer
+            final_predictions: Tensor of shape [batch, M, F] where F is prediction_length
         """
         # Validate input tensor
         self._validate_input(raw_input_tensor)
@@ -133,9 +145,66 @@ class PSformer(nn.Module):
         # The encoder returns its final output and a list of attention weights
         encoder_output, attention_weights_list = self.encoder(encoder_ready_data)
         
-        # ----- END OF INPUT PROCESSING PIPELINE -----
+        # ----- END OF INPUT PROCESSING, START OF OUTPUT PIPELINE -----
         
-        return encoder_output, attention_weights_list
+        # STEP 4.1: INVERSE DATA TRANSFORMATION
+        # Description: Convert the encoder's segmented output back to time series format.
+        # Paper reference: "Inverse Transformation" block in Fig 1 & 2.
+        reshaped_output = self.data_transformer.inverse_transform(
+            encoder_output, 
+            self.config.sequence_length
+        )  # Shape: [B, M, L]
+        
+        # STEP 4.2: LINEAR PROJECTION FOR FORECASTING
+        # Description: Project the restored sequence to the desired prediction horizon.
+        # Paper reference: "Linear Mapping" (Fig 1) or WF matrix multiplication (Section 3.2).
+        projected_output = self.output_projection(reshaped_output)  # Shape: [B, M, F]
+        
+        # STEP 4.3: INVERSE NORMALIZATION (RevIN Denorm)
+        # Description: Scale the forecast back to the original data distribution.
+        # Paper reference: "Inverse RevIN" (Fig 1) or "RevIN⁻¹" (Fig 2).
+        final_predictions = self.revin_layer(projected_output, mode='denorm')  # Shape: [B, M, F]
+        
+        return final_predictions
+    
+    def forward_with_intermediates(self, raw_input_tensor: torch.Tensor) -> Tuple[torch.Tensor, dict]:
+        """
+        Forward pass that returns both final predictions and intermediate outputs for analysis.
+        
+        Args:
+            raw_input_tensor: Input tensor of shape [batch_size, num_variables, sequence_length]
+        
+        Returns:
+            Tuple of (final_predictions, intermediates) where intermediates contains:
+            - encoder_output: Output from encoder
+            - attention_weights: List of attention weights 
+            - reshaped_output: Output after inverse transformation
+            - projected_output: Output after linear projection
+        """
+        # Validate input tensor
+        self._validate_input(raw_input_tensor)
+        
+        # Input processing pipeline
+        normalized_input = self.revin_layer(raw_input_tensor, mode='norm')
+        encoder_ready_data = self.data_transformer.forward_transform(normalized_input)
+        encoder_output, attention_weights_list = self.encoder(encoder_ready_data)
+        
+        # Output processing pipeline
+        reshaped_output = self.data_transformer.inverse_transform(
+            encoder_output, 
+            self.config.sequence_length
+        )
+        projected_output = self.output_projection(reshaped_output)
+        final_predictions = self.revin_layer(projected_output, mode='denorm')
+        
+        intermediates = {
+            'encoder_output': encoder_output,
+            'attention_weights': attention_weights_list,
+            'reshaped_output': reshaped_output,
+            'projected_output': projected_output
+        }
+        
+        return final_predictions, intermediates
     
     def _validate_input(self, input_tensor: torch.Tensor):
         """
@@ -201,33 +270,14 @@ class PSformer(nn.Module):
             }
         }
     
-    def denormalize_output(self, normalized_output: torch.Tensor, target_sequence_length: int) -> torch.Tensor:
-        """
-        Denormalize the model output using stored RevIN statistics.
-        This will be used in the output pipeline (future implementation).
-        
-        Args:
-            normalized_output: Normalized tensor from the model
-            target_sequence_length: Target sequence length for the output
-            
-        Returns:
-            Denormalized tensor
-        """
-        # First, restore the shape using data transformer
-        reshaped_output = self.data_transformer.inverse_transform(
-            normalized_output, target_sequence_length
-        )
-        
-        # Then denormalize using RevIN
-        denormalized_output = self.revin_layer(reshaped_output, mode='denorm')
-        
-        return denormalized_output
+
 
 
 def create_psformer_model(sequence_length: int, 
                          num_variables: int, 
                          patch_size: int, 
                          num_encoder_layers: int,
+                         prediction_length: int,
                          **kwargs) -> PSformer:
     """
     Factory function to create a PSformer model with default configuration.
@@ -237,6 +287,7 @@ def create_psformer_model(sequence_length: int,
         num_variables: Number of time series variables (M)
         patch_size: Size of each temporal patch (P)
         num_encoder_layers: Number of PSformer encoder layers
+        prediction_length: Length of prediction horizon (F)
         **kwargs: Additional configuration parameters
         
     Returns:
@@ -247,6 +298,7 @@ def create_psformer_model(sequence_length: int,
         num_variables=num_variables,
         patch_size=patch_size,
         num_encoder_layers=num_encoder_layers,
+        prediction_length=prediction_length,
         **kwargs
     )
     return PSformer(config)

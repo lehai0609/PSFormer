@@ -1,0 +1,177 @@
+Of course. As a TDD practitioner, building a thorough test suite before implementation is critical. Here is a brainstormed set of test scenarios for the **Output Processing Pipeline (Step 4.2 focused)**, presented as pseudo-code.
+
+The plan is based on your project files and strictly adheres to the model description in Section 3.2 of the PSformer paper.
+
+### **Testing Philosophy & Setup**
+
+The "Output Processing Pipeline" consists of three integrated steps: Inverse Transform, Linear Projection, and Inverse RevIN. While our focus is the **Linear Projection**, we must test it within the context of this pipeline. The tests will validate that this specific step behaves as expected and that the entire pipeline is architecturally sound.
+
+**Reference from Paper (Section 3.2, Page 5):**
+> "After passing through n layers of the PSformer Encoder, the final output is **X_pred = X_out * W_F**, where ... **W_F ∈ R^(L×F)** is a linear mapping and F is the prediction length."
+
+This equation is the ground truth for our tests. `X_out` is the result of the inverse transform (shape `[B, M, L]`), and `W_F` is our `output_projection` layer.
+
+---
+
+### **Test Suite: `TestOutputProcessingPipeline`**
+
+```python
+# PSEUDO-CODE TEST SUITE
+
+class TestOutputProcessingPipeline:
+
+    # --- Test Setup ---
+    # This setup method runs before each test function.
+    def setup_method(self):
+        # GIVEN a standard PSformer model configuration
+        self.batch_size = 8
+        self.num_variables = 7   # M
+        self.sequence_length = 96 # L
+        self.patch_size = 16
+        self.prediction_length = 24 # F
+        
+        # Create the fully assembled PSformer model
+        # This model contains the encoder, data_transformer, revin_layer, and the NEW output_projection layer.
+        self.model = create_psformer_model(
+            sequence_length=self.sequence_length,
+            num_variables=self.num_variables,
+            patch_size=self.patch_size,
+            num_encoder_layers=2,
+            prediction_length=self.prediction_length  # Assumes config is updated
+        )
+        
+        # AND a dummy output from the encoder
+        # This tensor simulates the input to our output pipeline.
+        num_patches = self.sequence_length // self.patch_size # N
+        segment_length = self.num_variables * self.patch_size   # C
+        self.encoder_output = create_dummy_tensor(shape=(self.batch_size, num_patches, segment_length))
+        
+        # AND a dummy raw input to calculate RevIN statistics
+        self.raw_input = create_dummy_tensor(shape=(self.batch_size, self.num_variables, self.sequence_length))
+        
+        # Pre-populate RevIN statistics by running the normalization step
+        # This is critical for testing the 'denorm' mode later.
+        self.model.revin_layer(self.raw_input, mode='norm')
+
+
+    # --- 1. Data Validation Tests ---
+    # Goal: Ensure the pipeline's inputs are handled correctly.
+    
+    def test_pipeline_fails_with_incorrect_encoder_output_shape(self):
+        # GIVEN encoder output with an incorrect number of patches (N)
+        invalid_encoder_output = create_dummy_tensor(shape=(self.batch_size, 5, self.model.psformer_dims['C'])) # 5 is wrong
+        
+        # WHEN attempting to run the output processing
+        # THEN the model should raise a ValueError during the inverse_transform step.
+        # This confirms the pipeline's entry point is shape-sensitive.
+        expect_value_error(lambda: self.model.process_output(invalid_encoder_output))
+
+    
+    # --- 2. Processing/Feature Engineering Tests ---
+    # Goal: Validate intermediate shapes and states.
+
+    def test_inverse_transform_produces_correct_intermediate_shape(self):
+        # GIVEN the valid encoder_output
+        
+        # WHEN performing ONLY the inverse data transformation (Step 4.1)
+        reshaped_output = self.model.data_transformer.inverse_transform(
+            self.encoder_output, 
+            self.model.config.sequence_length
+        )
+        
+        # THEN the intermediate tensor shape must be [B, M, L]
+        # This is the expected input shape for the linear projection layer.
+        expected_shape = (self.batch_size, self.num_variables, self.sequence_length)
+        assert reshaped_output.shape == expected_shape
+        
+    def test_denormalization_fails_if_stats_not_stored(self):
+        # GIVEN a new model instance that has NOT run normalization
+        fresh_model = create_psformer_model(...)
+        dummy_projection_output = create_dummy_tensor(shape=(self.batch_size, self.num_variables, self.prediction_length))
+
+        # WHEN attempting to call denormalize directly
+        # THEN the RevIN module should raise an AttributeError or a custom exception
+        # because self.mean and self.stdev have not been computed.
+        expect_attribute_error(lambda: fresh_model.revin_layer(dummy_projection_output, mode='denorm'))
+
+
+    # --- 3. Model Behavior Tests ---
+    # Goal: Assert specific, measurable outcomes of the linear projection.
+    
+    def test_final_output_shape_is_correct(self):
+        # GIVEN the valid encoder_output
+        
+        # WHEN the full output pipeline is executed
+        final_predictions = self.model.process_output(self.encoder_output) # A hypothetical method for clarity
+        
+        # THEN the final output shape must be [B, M, F]
+        # This directly tests the effect of the linear projection layer (mapping L -> F).
+        # Paper Reference: Confirms X_pred ∈ R^(M×F).
+        expected_shape = (self.batch_size, self.num_variables, self.prediction_length)
+        assert final_predictions.shape == expected_shape
+
+    def test_pipeline_works_with_batch_size_one(self):
+        # GIVEN encoder output with a batch size of 1
+        single_item_encoder_output = create_dummy_tensor(shape=(1, self.model.psformer_dims['N'], self.model.psformer_dims['C']))
+        
+        # WHEN the full output pipeline is executed
+        final_predictions = self.model.process_output(single_item_encoder_output)
+        
+        # THEN the output shape should be correct for a single batch item.
+        # This prevents errors from hardcoded batch dimensions (e.g., `squeeze()`).
+        expected_shape = (1, self.num_variables, self.prediction_length)
+        assert final_predictions.shape == expected_shape
+
+    def test_zero_input_to_projection_yields_revIN_mean(self):
+        # GIVEN the encoder output is all zeros
+        zero_encoder_output = create_zero_tensor(shape=(self.batch_size, self.model.psformer_dims['N'], self.model.psformer_dims['C']))
+        
+        # WHEN the output pipeline processes this zero tensor
+        final_predictions = self.model.process_output(zero_encoder_output)
+        
+        # THEN the final prediction should be equal to the stored RevIN mean.
+        # Logic: inverse_transform(0) -> 0 -> linear_projection(0) -> 0 -> denorm(0) = (0 * stdev) + mean = mean.
+        # This elegantly tests the integration of the linear layer and RevIN.
+        stored_mean = self.model.revin_layer.mean
+        assert torch.allclose(final_predictions, stored_mean)
+        
+    # --- 4. Performance and Robustness Tests ---
+    # Goal: Simulate adverse scenarios to ensure graceful failure.
+    
+    def test_nan_values_propagate_through_pipeline(self):
+        # GIVEN encoder output containing NaN values
+        nan_encoder_output = self.encoder_output.clone()
+        nan_encoder_output[0, 0, 0] = float('nan')
+        
+        # WHEN the full output pipeline is executed
+        final_predictions = self.model.process_output(nan_encoder_output)
+        
+        # THEN the output should also contain NaN values and the model should not crash.
+        assert torch.isnan(final_predictions).any() == True
+
+        
+    # --- 5. Architecture Tests ---
+    # Goal: Ensure layers are connected correctly and are trainable.
+
+    def test_projection_layer_weights_have_correct_shape(self):
+        # GIVEN the initialized model
+        
+        # THEN the output_projection layer's weight matrix must have shape [F, L]
+        # Paper Reference: This validates that W_F ∈ R^(L×F) is implemented correctly,
+        # noting PyTorch's [out_features, in_features] convention.
+        projection_layer = self.model.output_projection
+        expected_weight_shape = (self.prediction_length, self.sequence_length)
+        assert projection_layer.weight.shape == expected_weight_shape
+
+    def test_projection_layer_is_trainable(self):
+        # GIVEN a full forward pass and a backward pass
+        final_predictions = self.model.process_output(self.encoder_output)
+        loss = calculate_loss(final_predictions, create_dummy_target(final_predictions.shape))
+        loss.backward()
+        
+        # THEN the gradient of the output_projection layer's weights must not be None.
+        # This is a critical test to ensure the layer is part of the computation graph
+        # and its parameters will be updated during training.
+        assert self.model.output_projection.weight.grad is not None
+        
+```

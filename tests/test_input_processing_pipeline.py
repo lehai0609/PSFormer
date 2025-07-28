@@ -17,7 +17,8 @@ class TestInputProcessingPipeline:
             'sequence_length': 512,
             'patch_size': 32,
             'num_variables': 7,
-            'num_encoder_layers': 3
+            'num_encoder_layers': 3,
+            'prediction_length': 96
         }
     
     @pytest.fixture
@@ -280,14 +281,11 @@ class TestInputProcessingPipeline:
             test_input = torch.randn(batch_size, default_config['num_variables'], default_config['sequence_length'])
             
             # Should not crash and should produce correct output shape
-            encoder_output, attention_weights = model(test_input)
+            final_predictions = model(test_input)
             
-            N_segments = default_config['sequence_length'] // default_config['patch_size']
-            C_segment_length = default_config['num_variables'] * default_config['patch_size']
-            expected_shape = (batch_size, N_segments, C_segment_length)
+            expected_shape = (batch_size, default_config['num_variables'], default_config['prediction_length'])
             
-            assert encoder_output.shape == expected_shape
-            assert len(attention_weights) == default_config['num_encoder_layers']
+            assert final_predictions.shape == expected_shape
 
     # ===== 7. EDGE CASE TESTS =====
     
@@ -297,18 +295,18 @@ class TestInputProcessingPipeline:
             'sequence_length': 4,  # Minimal sequence that can be patched
             'patch_size': 2,
             'num_variables': 1,
-            'num_encoder_layers': 1
+            'num_encoder_layers': 1,
+            'prediction_length': 2
         }
         
         model = create_psformer_model(**minimal_config)
         test_input = torch.randn(1, 1, 4)
         
-        encoder_output, attention_weights = model(test_input)
+        final_predictions = model(test_input)
         
         # Should work correctly even with minimal configuration
-        expected_shape = (1, 2, 2)  # batch=1, N=2, C=1*2=2
-        assert encoder_output.shape == expected_shape
-        assert len(attention_weights) == 1
+        expected_shape = (1, 1, 2)  # batch=1, variables=1, prediction_length=2
+        assert final_predictions.shape == expected_shape
     
     def test_pipeline_with_large_configuration(self):
         """Test pipeline with larger configuration"""
@@ -316,21 +314,19 @@ class TestInputProcessingPipeline:
             'sequence_length': 1024,
             'patch_size': 64,
             'num_variables': 12,
-            'num_encoder_layers': 6
+            'num_encoder_layers': 6,
+            'prediction_length': 192
         }
         
         model = create_psformer_model(**large_config)
         test_input = torch.randn(2, 12, 1024)
         
-        encoder_output, attention_weights = model(test_input)
+        final_predictions = model(test_input)
         
         # Should handle larger configurations
-        N_segments = 1024 // 64  # 16
-        C_segment_length = 12 * 64  # 768
-        expected_shape = (2, N_segments, C_segment_length)
+        expected_shape = (2, 12, 192)  # batch=2, variables=12, prediction_length=192
         
-        assert encoder_output.shape == expected_shape
-        assert len(attention_weights) == 6
+        assert final_predictions.shape == expected_shape
 
 
 class TestPSformerConfig:
@@ -342,13 +338,15 @@ class TestPSformerConfig:
             sequence_length=512,
             num_variables=7,
             patch_size=32,
-            num_encoder_layers=3
+            num_encoder_layers=3,
+            prediction_length=96
         )
         
         assert config.sequence_length == 512
         assert config.num_variables == 7
         assert config.patch_size == 32
         assert config.num_encoder_layers == 3
+        assert config.prediction_length == 96
     
     def test_invalid_sequence_length_not_divisible_by_patch_size(self):
         """Test that invalid sequence length raises error"""
@@ -357,7 +355,8 @@ class TestPSformerConfig:
                 sequence_length=513,  # Not divisible by 32
                 num_variables=7,
                 patch_size=32,
-                num_encoder_layers=3
+                num_encoder_layers=3,
+                prediction_length=96
             )
     
     def test_invalid_negative_values(self):
@@ -367,7 +366,8 @@ class TestPSformerConfig:
                 sequence_length=512,
                 num_variables=-1,  # Invalid
                 patch_size=32,
-                num_encoder_layers=3
+                num_encoder_layers=3,
+                prediction_length=96
             )
         
         with pytest.raises(ValueError, match="must be positive"):
@@ -375,7 +375,8 @@ class TestPSformerConfig:
                 sequence_length=512,
                 num_variables=7,
                 patch_size=-1,  # Invalid
-                num_encoder_layers=3
+                num_encoder_layers=3,
+                prediction_length=96
             )
         
         with pytest.raises(ValueError, match="must be positive"):
@@ -383,7 +384,8 @@ class TestPSformerConfig:
                 sequence_length=512,
                 num_variables=7,
                 patch_size=32,
-                num_encoder_layers=0  # Invalid
+                num_encoder_layers=0,  # Invalid
+                prediction_length=96
             )
 
 
