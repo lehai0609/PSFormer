@@ -30,6 +30,8 @@ class RevIN(nn.Module):
         self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
 
     def _get_statistics(self, x):
+        if x.ndim != 3:
+            raise IndexError(f"Expected 3D input tensor [batch, channels, length], got {x.ndim}D tensor")
         dim2reduce = tuple(range(1, x.ndim-1))
         self.mean = torch.mean(x, dim=dim2reduce, keepdim=True).detach()
         self.stdev = torch.sqrt(torch.var(x, dim=dim2reduce, keepdim=True, unbiased=False) + self.eps).detach()
@@ -38,14 +40,22 @@ class RevIN(nn.Module):
         x = x - self.mean
         x = x / self.stdev
         if self.affine:
-            x = x * self.affine_weight
-            x = x + self.affine_bias
+            # Reshape affine parameters to broadcast properly
+            # For input [B, C, T] and statistics [B, 1, T], 
+            # reshape affine params [C] to [1, C, 1] for broadcasting
+            weight = self.affine_weight.view(1, -1, 1)
+            bias = self.affine_bias.view(1, -1, 1)
+            x = x * weight
+            x = x + bias
         return x
 
     def _denormalize(self, x):
         if self.affine:
-            x = x - self.affine_bias
-            x = x / (self.affine_weight + self.eps*self.eps)
+            # Reshape affine parameters to broadcast properly
+            weight = self.affine_weight.view(1, -1, 1)
+            bias = self.affine_bias.view(1, -1, 1)
+            x = x - bias
+            x = x / (weight + self.eps*self.eps)
         x = x * self.stdev
         x = x + self.mean
         return x
