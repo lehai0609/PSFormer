@@ -1,0 +1,271 @@
+
+Here is a detailed breakdown of where you would expect to find them and why they are missing from your implementation.
+
+---
+
+### 1. RevIN Look-back Window
+
+This parameter is a crucial modification to the `RevIN` module, especially for non-stationary data like the Exchange dataset in the paper.
+
+**Where it Should Be:**
+
+The look-back window logic should be inside your `RevIN` class, specifically within the `_get_statistics` method. This method is responsible for calculating the mean and standard deviation for normalization.
+
+**Your Current Implementation:**
+
+```python
+# In your RevIN class
+def _get_statistics(self, x):
+    # This calculates statistics over the ENTIRE sequence length
+    dim2reduce = tuple(range(1, x.ndim-1)) 
+    self.mean = torch.mean(x, dim=dim2reduce, keepdim=True).detach()
+    self.stdev = torch.sqrt(torch.var(x, dim=dim2reduce, keepdim=True, unbiased=False) + self.eps).detach()
+```
+
+**Why it's Missing:**
+
+*   Your code calculates the `mean` and `stdev` across the **entire input sequence `x`**.
+*   To implement the paper's setting for the Exchange dataset (a look-back window of 16), you would need to modify this function to calculate statistics **only on the last 16 time steps** of the input sequence.
+
+**Example of How to Implement It (Conceptual):**
+
+You would need to add a `lookback_window` parameter to your `RevIN` class and use it to slice the tensor.
+
+```python
+class RevIN(nn.Module):
+    # Add lookback_window to __init__
+    def __init__(self, num_features: int, eps=1e-5, affine=True, lookback_window: Optional[int] = None):
+        super(RevIN, self).__init__()
+        self.lookback_window = lookback_window
+        # ... rest of the init
+        
+    def _get_statistics(self, x):
+        if self.lookback_window is not None:
+            # Slice the tensor to use only the last 'lookback_window' steps for stats
+            x_stats = x[:, :, -self.lookback_window:] 
+        else:
+            x_stats = x
+
+        # Note: The dimension to reduce for instance normalization should be the last one (time dimension)
+        # The original implementation had a potential bug here. It should be dim=-1.
+        self.mean = torch.mean(x_stats, dim=-1, keepdim=True).detach()
+        self.stdev = torch.sqrt(torch.var(x_stats, dim=-1, keepdim=True, unbiased=False) + self.eps).detach()
+
+```
+
+Of course. Moving from an inference-only script to a full training and production-ready system involves several logical steps. Here are the detailed instructions and pseudocode for each aspect you requested.
+
+---
+
+### 1. Model Training: From Random Weights to an Expert Forecaster
+
+The goal is to teach the model by showing it historical data and penalizing it for incorrect predictions, so it learns the underlying patterns. This requires a structured training process with distinct data splits.
+
+#### **A. The Data Splitting Strategy (Chronological)**
+
+For time series forecasting, you cannot shuffle data randomly. The model must be trained on the past, validated on the near-future, and tested on the most recent, completely unseen data.
+
+**Instruction:**
+Divide your `stock_data.csv` into three contiguous (non-overlapping) chronological sets:
+1.  **Training Set (e.g., first 70% of data):** The largest portion, used for the model to learn weights.
+2.  **Validation Set (e.g., next 15%):** Used after each training epoch to check the model's performance on data it hasn't been trained on. This helps prevent *overfitting* and is used for early stopping.
+3.  **Test Set (e.g., last 15%):** Held back until all training is complete. This provides the final, unbiased measure of your model's real-world performance.
+
+```pseudocode
+// Data Splitting Logic
+function split_data(dataframe, train_pct=0.7, val_pct=0.15):
+    n_total = length(dataframe)
+    train_end_index = floor(n_total * train_pct)
+    val_end_index = train_end_index + floor(n_total * val_pct)
+
+    train_df = dataframe[0 : train_end_index]
+    val_df = dataframe[train_end_index : val_end_index]
+    test_df = dataframe[val_end_index : end]
+
+    return train_df, val_df, test_df
+```
+
+#### **B. The Data Pipeline (`Dataset` & `DataLoader`)**
+
+Instead of preparing one chunk of data, you need to create sliding windows of `(input_sequence, target_sequence)` pairs from your data splits. PyTorch's `Dataset` and `DataLoader` are perfect for this.
+
+**Instruction:**
+Create a custom `StockDataset` class that takes a DataFrame (e.g., `train_df`) and generates samples. Each sample consists of an input sequence of `SEQUENCE_LENGTH` and a corresponding target sequence of `PREDICTION_LENGTH` that immediately follows it. The `DataLoader` will then automatically batch these samples for efficient training.
+
+```pseudocode
+// PyTorch Dataset Pseudocode
+class StockDataset(Dataset):
+    function __init__(self, dataframe, sequence_length, prediction_length):
+        self.data = dataframe[TICKER_SYMBOLS].values
+        self.sequence_length = sequence_length
+        self.prediction_length = prediction_length
+
+    function __len__(self):
+        // Total number of possible sequences we can create
+        return length(self.data) - self.sequence_length - self.prediction_length + 1
+
+    function __getitem__(self, index):
+        input_start = index
+        input_end = index + self.sequence_length
+        target_end = input_end + self.prediction_length
+
+        input_seq = self.data[input_start : input_end]
+        target_seq = self.data[input_end : target_end]
+        
+        // Return as tensors, transposed to [num_variables, length]
+        return to_tensor(input_seq).transpose(0, 1), to_tensor(target_seq).transpose(0, 1)
+
+// DataLoader Usage
+train_dataset = StockDataset(train_df, SEQUENCE_LENGTH, PREDICTION_LENGTH)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True) // Shuffle is okay here
+
+val_dataset = StockDataset(val_df, SEQUENCE_LENGTH, PREDICTION_LENGTH)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+```
+
+#### **C. The Training and Validation Loop**
+
+This is the core engine. You'll loop through the data multiple times (epochs), updating the model's weights in each pass. You will also implement **Early Stopping** to prevent overfitting and save the best model.
+
+**Instruction:**
+1.  Initialize your model, a loss function (like Mean Squared Error), and an optimizer (like Adam or AdamW).
+2.  Create a loop that runs for a maximum number of epochs.
+3.  Inside the epoch loop, run a **training step** and a **validation step**.
+4.  In the training step, calculate the loss and use it to update the model's weights.
+5.  In the validation step, evaluate the model's performance on the validation set.
+6.  Keep track of the best validation loss. If the loss doesn't improve for a certain number of epochs ("patience"), stop training.
+7.  Always save the version of the model that achieved the best validation loss.
+
+```pseudocode
+// Training Loop Pseudocode
+function train_model():
+    model = PSformer(config)
+    optimizer = AdamW(model.parameters(), lr=0.0001)
+    criterion = MSELoss()
+
+    best_val_loss = infinity
+    patience_counter = 0
+    PATIENCE = 10 // Stop after 10 epochs of no improvement
+
+    for epoch in 1 to MAX_EPOCHS:
+        // --- TRAINING STEP ---
+        model.train() // Set model to training mode
+        total_train_loss = 0
+        for (inputs, targets) in train_loader:
+            optimizer.zero_grad() // Reset gradients
+            predictions = model(inputs) // Forward pass
+            loss = criterion(predictions, targets)
+            loss.backward() // Backward pass (calculate gradients)
+            optimizer.step() // Update weights
+            total_train_loss += loss.item()
+
+        avg_train_loss = total_train_loss / len(train_loader)
+        
+        // --- VALIDATION STEP ---
+        model.eval() // Set model to evaluation mode
+        total_val_loss = 0
+        with torch.no_grad(): // Disable gradient calculation
+            for (inputs, targets) in val_loader:
+                predictions = model(inputs)
+                loss = criterion(predictions, targets)
+                total_val_loss += loss.item()
+
+        avg_val_loss = total_val_loss / len(val_loader)
+        print(f"Epoch {epoch}: Train Loss = {avg_train_loss}, Val Loss = {avg_val_loss}")
+
+        // --- EARLY STOPPING & MODEL SAVING ---
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            save_model(model, "best_model.pth") // Save the best version
+        else:
+            patience_counter += 1
+            if patience_counter >= PATIENCE:
+                print("Early stopping triggered!")
+                break
+    
+    // --- FINAL TESTING ---
+    best_model = load_model("best_model.pth")
+    evaluate_on_test_set(best_model, test_loader)
+```
+
+---
+
+---
+
+### 2. Data Pipeline: Using the Static `stock_data.csv`
+
+Your assessment is correct; the pipeline is simple because the data is already cleaned and consolidated. The key steps were covered in the data splitting and `Dataset` creation sections above. The "real-time" aspect comes into play when you want to make a **new prediction after training is complete**.
+
+**Instruction (for making a new prediction):**
+1.  Load your fully trained and saved `best_model.pth`.
+2.  Take the **very last** `SEQUENCE_LENGTH` days from your `stock_data.csv`.
+3.  Convert this slice of data into a tensor with the correct shape `[1, num_variables, sequence_length]`.
+4.  Feed this tensor into the model to get the forecast for the next `PREDICTION_LENGTH` days.
+
+---
+
+### 3. Risk Management: Quantifying Uncertainty
+
+A single-point forecast is incomplete. Providing a prediction interval (e.g., a 90% confidence band) is crucial for risk management. **Monte Carlo (MC) Dropout** is a straightforward way to achieve this without changing your model's architecture.
+
+**Instruction:**
+1.  Ensure your model has `nn.Dropout` layers. Your `ScaledDotProductAttention` class has one, which is perfect.
+2.  Load your best trained model.
+3.  Instead of `model.eval()`, call `model.train()`. This is a deliberate trick to keep the dropout layers active during inference.
+4.  Run the same input tensor (the last `SEQUENCE_LENGTH` days) through the model multiple times (e.g., `T=100` times) in a loop. Because dropout randomly deactivates neurons, each forward pass will produce a slightly different prediction.
+5.  You will now have `T` different forecasts. You can compute the mean and percentiles from this distribution.
+
+```pseudocode
+// MC Dropout for Uncertainty Quantification Pseudocode
+function get_prediction_with_uncertainty(model, input_tensor, num_simulations=100):
+    model.train() // CRITICAL: Keep dropout active for inference
+
+    all_predictions = []
+    with torch.no_grad():
+        for i in 1 to num_simulations:
+            prediction = model(input_tensor)
+            all_predictions.append(prediction)
+
+    // Stack predictions into a single tensor: [num_simulations, batch, vars, pred_len]
+    predictions_tensor = torch.stack(all_predictions)
+
+    // Calculate statistics across the simulation dimension
+    mean_prediction = torch.mean(predictions_tensor, dim=0)
+    lower_bound = torch.quantile(predictions_tensor, 0.05, dim=0) // 5th percentile
+    upper_bound = torch.quantile(predictions_tensor, 0.95, dim=0) // 95th percentile
+
+    return mean_prediction, lower_bound, upper_bound
+
+// --- Usage ---
+// final_prediction, low_ci, high_ci = get_prediction_with_uncertainty(best_model, latest_data_tensor)
+// You can now plot the mean forecast along with the confidence interval bands.
+```
+---
+
+### 4. SAM Hyperparameter (rho)
+
+The `rho` hyperparameter belongs to the **Sharpness-Aware Minimization (SAM)** optimizer, which is used during model training to find flatter minima for better generalization.
+
+**Where it Should Be:**
+
+You would find the SAM optimizer and its `rho` parameter in a **training loop**. A typical ML script has separate sections for model definition, data loading, training, and evaluation. SAM would be defined right before the training starts.
+
+**Your Current Implementation:**
+
+Your notebook is designed purely for **demonstration and inference**, not for training. Key evidence for this is:
+*   You initialize the model with random weights.
+*   You immediately call `model.eval()` to put the model in evaluation mode.
+*   You use `with torch.no_grad():` for the prediction, which disables gradient calculation.
+*   **There is no training loop** (`for epoch in range(...)`), no optimizer definition (`torch.optim.Adam` or a custom `SAM` class), and no loss function calculation (`loss.backward()`).
+
+**Why it's Missing:**
+
+*   Since your notebook does not contain a training pipeline, there is no need for an optimizer. Consequently, the SAM optimizer and its `rho` parameter are not included.
+
+**To implement this, you would need to build a full training pipeline, which is a significant addition, including:**
+1.  A custom `SAM` optimizer class.
+2.  A training dataloader that yields batches of data.
+3.  A loop to iterate through epochs and batches.
+4.  A loss function (e.g., `nn.MSELoss`).
+5.  The `loss.backward()` and `optimizer.step()` calls to update model weights.
